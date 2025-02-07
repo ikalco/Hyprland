@@ -3,7 +3,6 @@
 #include "HyprNotificationOverlay.hpp"
 #include "../Compositor.hpp"
 #include "../config/ConfigValue.hpp"
-#include "../render/pass/TexPassElement.hpp"
 
 #include "../managers/AnimationManager.hpp"
 #include "../managers/HookSystemManager.hpp"
@@ -28,8 +27,6 @@ CHyprNotificationOverlay::CHyprNotificationOverlay() {
 
         g_pHyprRenderer->damageBox(m_bLastDamage);
     });
-
-    m_pTexture = makeShared<CTexture>();
 }
 
 CHyprNotificationOverlay::~CHyprNotificationOverlay() {
@@ -49,6 +46,8 @@ void CHyprNotificationOverlay::addNotification(const std::string& text, const CH
     PNOTIF->icon     = icon;
     PNOTIF->fontSize = fontSize;
 
+    PNOTIF->textTexture = makeShared<CTexture>();
+
     for (auto const& m : g_pCompositor->m_vMonitors) {
         g_pCompositor->scheduleFrameForMonitor(m);
     }
@@ -66,16 +65,12 @@ void CHyprNotificationOverlay::dismissNotifications(const int amount) {
     }
 }
 
-CBox CHyprNotificationOverlay::drawNotifications(PHLMONITOR pMonitor) {
-    static constexpr auto ANIM_DURATION_MS   = 600.0;
-    static constexpr auto ANIM_LAG_MS        = 100.0;
+void CHyprNotificationOverlay::drawTextTexture(PHLMONITOR pMonitor) {
     static constexpr auto NOTIF_LEFTBAR_SIZE = 5.0;
     static constexpr auto ICON_PAD           = 3.0;
     static constexpr auto ICON_SCALE         = 0.9;
-    static constexpr auto GRADIENT_SIZE      = 60.0;
 
-    float                 offsetY  = 10;
-    float                 maxWidth = 0;
+    float                 offsetY = 10;
 
     const auto            SCALE   = pMonitor->scale;
     const auto            MONSIZE = pMonitor->vecTransformedSize;
@@ -90,12 +85,89 @@ CBox CHyprNotificationOverlay::drawNotifications(PHLMONITOR pMonitor) {
     pango_font_description_set_weight(pangoFD, PANGO_WEIGHT_NORMAL);
 
     const auto iconBackendID = iconBackendFromLayout(layout);
-    const auto PBEZIER       = g_pAnimationManager->getBezier("default");
 
     for (auto const& notif : m_vNotifications) {
+        // clear the pixmap
+        cairo_save(m_pCairo);
+        cairo_set_operator(m_pCairo, CAIRO_OPERATOR_CLEAR);
+        cairo_paint(m_pCairo);
+        cairo_restore(m_pCairo);
+
+        cairo_surface_flush(m_pCairoSurface);
+
         const auto ICONPADFORNOTIF = notif->icon == ICON_NONE ? 0 : ICON_PAD;
         const auto FONTSIZE        = std::clamp((int)(notif->fontSize * ((pMonitor->vecPixelSize.x * SCALE) / 1920.f)), 8, 40);
+        const auto ICON            = ICONS_ARRAY[iconBackendID][notif->icon];
 
+        // get text size
+        int iconW = 0, iconH = 0;
+        pango_font_description_set_absolute_size(pangoFD, PANGO_SCALE * FONTSIZE * ICON_SCALE);
+        pango_layout_set_font_description(layout, pangoFD);
+        pango_layout_set_text(layout, ICON.c_str(), -1);
+        pango_layout_get_size(layout, &iconW, &iconH);
+        iconW /= PANGO_SCALE;
+        iconH /= PANGO_SCALE;
+
+        int textW = 0, textH = 0;
+        pango_font_description_set_absolute_size(pangoFD, PANGO_SCALE * FONTSIZE);
+        pango_layout_set_font_description(layout, pangoFD);
+        pango_layout_set_text(layout, notif->text.c_str(), -1);
+        pango_layout_get_size(layout, &textW, &textH);
+        textW /= PANGO_SCALE;
+        textH /= PANGO_SCALE;
+
+        notif->size          = Vector2D{textW + 20.0 + iconW + 2 * ICONPADFORNOTIF, textH + 10.0};
+        const auto NOTIFSIZE = notif->size;
+
+        // draw icon
+        if (notif->icon != ICON_NONE) {
+            cairo_set_source_rgb(m_pCairo, 1.f, 1.f, 1.f);
+            cairo_move_to(m_pCairo, MONSIZE.x - NOTIFSIZE.x + NOTIF_LEFTBAR_SIZE + ICONPADFORNOTIF - 1, offsetY - 2 + std::round((NOTIFSIZE.y - iconH) / 2.0));
+            pango_layout_set_text(layout, ICON.c_str(), -1);
+            pango_cairo_show_layout(m_pCairo, layout);
+        }
+
+        // draw text
+        cairo_set_source_rgb(m_pCairo, 1.f, 1.f, 1.f);
+        cairo_move_to(m_pCairo, MONSIZE.x - NOTIFSIZE.x + NOTIF_LEFTBAR_SIZE + iconW + 2 * ICONPADFORNOTIF, offsetY - 2 + std::round((NOTIFSIZE.y - textH) / 2.0));
+        pango_layout_set_text(layout, notif->text.c_str(), -1);
+        pango_cairo_show_layout(m_pCairo, layout);
+
+        // adjust offset and move on
+        offsetY += NOTIFSIZE.y + 10;
+
+        // copy the data to an OpenGL texture we have
+        const auto DATA = cairo_image_surface_get_data(m_pCairoSurface);
+        notif->textTexture->allocate();
+        glBindTexture(GL_TEXTURE_2D, notif->textTexture->m_iTexID);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+
+#ifndef GLES2
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_R, GL_BLUE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_B, GL_RED);
+#endif
+
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, MONSIZE.x, MONSIZE.y, 0, GL_RGBA, GL_UNSIGNED_BYTE, DATA);
+    }
+
+    pango_font_description_free(pangoFD);
+    g_object_unref(layout);
+}
+
+CBox CHyprNotificationOverlay::calcNotifications(PHLMONITOR pMonitor, std::vector<CNotifPassElement::SNotifRenderData>& notifs) {
+    static constexpr auto ANIM_DURATION_MS   = 600.0;
+    static constexpr auto ANIM_LAG_MS        = 100.0;
+    static constexpr auto NOTIF_LEFTBAR_SIZE = 5.0;
+    static constexpr auto GRADIENT_SIZE      = 60.0;
+
+    float                 offsetY  = 10;
+    float                 maxWidth = 0;
+
+    const auto            MONSIZE = pMonitor->vecTransformedSize;
+    const auto            PBEZIER = g_pAnimationManager->getBezier("default");
+
+    for (auto const& notif : m_vNotifications) {
         // first rect (bg, col)
         const float FIRSTRECTANIMP =
             (notif->started.getMillis() > (ANIM_DURATION_MS - ANIM_LAG_MS) ?
@@ -114,30 +186,21 @@ CBox CHyprNotificationOverlay::drawNotifications(PHLMONITOR pMonitor) {
         const float SECONDRECTPERC = SECONDRECTANIMP >= 0.99f ? 1.f : PBEZIER->getYForPoint(SECONDRECTANIMP);
 
         // third rect (horiz, col)
-        const float THIRDRECTPERC = notif->started.getMillis() / notif->timeMs;
+        const float                         THIRDRECTPERC = notif->started.getMillis() / notif->timeMs;
 
-        // get text size
-        const auto ICON      = ICONS_ARRAY[iconBackendID][notif->icon];
-        const auto ICONCOLOR = ICONS_COLORS[notif->icon];
+        const auto                          NOTIFSIZE = notif->size;
 
-        int        iconW = 0, iconH = 0;
-        pango_font_description_set_absolute_size(pangoFD, PANGO_SCALE * FONTSIZE * ICON_SCALE);
-        pango_layout_set_font_description(layout, pangoFD);
-        pango_layout_set_text(layout, ICON.c_str(), -1);
-        pango_layout_get_size(layout, &iconW, &iconH);
-        iconW /= PANGO_SCALE;
-        iconH /= PANGO_SCALE;
+        CNotifPassElement::SNotifRenderData notifData;
+        notifData.color        = notif->color;
+        notifData.iconColor    = ICONS_COLORS[notif->icon];
+        notifData.lagRect      = CBox{MONSIZE.x - (NOTIFSIZE.x + NOTIF_LEFTBAR_SIZE) * FIRSTRECTPERC, offsetY, (NOTIFSIZE.x + NOTIF_LEFTBAR_SIZE) * FIRSTRECTPERC, NOTIFSIZE.y};
+        notifData.backRect     = CBox{MONSIZE.x - NOTIFSIZE.x * SECONDRECTPERC, offsetY, NOTIFSIZE.x * SECONDRECTPERC, NOTIFSIZE.y};
+        notifData.loadingRect  = CBox{MONSIZE.x - NOTIFSIZE.x * SECONDRECTPERC + 3, offsetY + NOTIFSIZE.y - 4, THIRDRECTPERC * (NOTIFSIZE.x - 6), 2};
+        notifData.gradientRect = CBox{MONSIZE.x - (NOTIFSIZE.x + NOTIF_LEFTBAR_SIZE) * FIRSTRECTPERC, offsetY, GRADIENT_SIZE, NOTIFSIZE.y};
 
-        int textW = 0, textH = 0;
-        pango_font_description_set_absolute_size(pangoFD, PANGO_SCALE * FONTSIZE);
-        pango_layout_set_font_description(layout, pangoFD);
-        pango_layout_set_text(layout, notif->text.c_str(), -1);
-        pango_layout_get_size(layout, &textW, &textH);
-        textW /= PANGO_SCALE;
-        textH /= PANGO_SCALE;
+        notifs.emplace_back(notifData);
 
-        const auto NOTIFSIZE = Vector2D{textW + 20.0 + iconW + 2 * ICONPADFORNOTIF, textH + 10.0};
-
+        /*
         // draw rects
         cairo_set_source_rgba(m_pCairo, notif->color.r, notif->color.g, notif->color.b, notif->color.a);
         cairo_rectangle(m_pCairo, MONSIZE.x - (NOTIFSIZE.x + NOTIF_LEFTBAR_SIZE) * FIRSTRECTPERC, offsetY, (NOTIFSIZE.x + NOTIF_LEFTBAR_SIZE) * FIRSTRECTPERC, NOTIFSIZE.y);
@@ -153,6 +216,8 @@ CBox CHyprNotificationOverlay::drawNotifications(PHLMONITOR pMonitor) {
 
         // draw gradient
         if (notif->icon != ICON_NONE) {
+            const auto       ICONCOLOR = ICONS_COLORS[notif->icon];
+
             cairo_pattern_t* pattern;
             pattern = cairo_pattern_create_linear(MONSIZE.x - (NOTIFSIZE.x + NOTIF_LEFTBAR_SIZE) * FIRSTRECTPERC, offsetY,
                                                   MONSIZE.x - (NOTIFSIZE.x + NOTIF_LEFTBAR_SIZE) * FIRSTRECTPERC + GRADIENT_SIZE, offsetY);
@@ -162,19 +227,8 @@ CBox CHyprNotificationOverlay::drawNotifications(PHLMONITOR pMonitor) {
             cairo_set_source(m_pCairo, pattern);
             cairo_fill(m_pCairo);
             cairo_pattern_destroy(pattern);
-
-            // draw icon
-            cairo_set_source_rgb(m_pCairo, 1.f, 1.f, 1.f);
-            cairo_move_to(m_pCairo, MONSIZE.x - NOTIFSIZE.x * SECONDRECTPERC + NOTIF_LEFTBAR_SIZE + ICONPADFORNOTIF - 1, offsetY - 2 + std::round((NOTIFSIZE.y - iconH) / 2.0));
-            pango_layout_set_text(layout, ICON.c_str(), -1);
-            pango_cairo_show_layout(m_pCairo, layout);
         }
-
-        // draw text
-        cairo_set_source_rgb(m_pCairo, 1.f, 1.f, 1.f);
-        cairo_move_to(m_pCairo, MONSIZE.x - NOTIFSIZE.x * SECONDRECTPERC + NOTIF_LEFTBAR_SIZE + iconW + 2 * ICONPADFORNOTIF, offsetY - 2 + std::round((NOTIFSIZE.y - textH) / 2.0));
-        pango_layout_set_text(layout, notif->text.c_str(), -1);
-        pango_cairo_show_layout(m_pCairo, layout);
+		*/
 
         // adjust offset and move on
         offsetY += NOTIFSIZE.y + 10;
@@ -182,9 +236,6 @@ CBox CHyprNotificationOverlay::drawNotifications(PHLMONITOR pMonitor) {
         if (maxWidth < NOTIFSIZE.x)
             maxWidth = NOTIFSIZE.x;
     }
-
-    pango_font_description_free(pangoFD);
-    g_object_unref(layout);
 
     // cleanup notifs
     std::erase_if(m_vNotifications, [](const auto& notif) { return notif->started.getMillis() > notif->timeMs; });
@@ -213,17 +264,15 @@ void CHyprNotificationOverlay::draw(PHLMONITOR pMonitor) {
     if (m_vNotifications.size() == 0)
         return;
 
+    if (m_bRedrawTextTextures) {
+        m_bRedrawTextTextures = false;
+        drawTextTexture(pMonitor);
+    }
+
+    CNotifPassElement::SRenderData data;
+
     // Render to the monitor
-
-    // clear the pixmap
-    cairo_save(m_pCairo);
-    cairo_set_operator(m_pCairo, CAIRO_OPERATOR_CLEAR);
-    cairo_paint(m_pCairo);
-    cairo_restore(m_pCairo);
-
-    cairo_surface_flush(m_pCairoSurface);
-
-    CBox damage = drawNotifications(pMonitor);
+    CBox damage = calcNotifications(pMonitor, data.notifs);
 
     g_pHyprRenderer->damageBox(damage);
     g_pHyprRenderer->damageBox(m_bLastDamage);
@@ -232,26 +281,11 @@ void CHyprNotificationOverlay::draw(PHLMONITOR pMonitor) {
 
     m_bLastDamage = damage;
 
-    // copy the data to an OpenGL texture we have
-    const auto DATA = cairo_image_surface_get_data(m_pCairoSurface);
-    m_pTexture->allocate();
-    glBindTexture(GL_TEXTURE_2D, m_pTexture->m_iTexID);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    data.tex    = m_pTextTexture;
+    data.texBox = {0, 0, MONSIZE.x, MONSIZE.y};
+    // data.damage = damage;
 
-#ifndef GLES2
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_R, GL_BLUE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_B, GL_RED);
-#endif
-
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, MONSIZE.x, MONSIZE.y, 0, GL_RGBA, GL_UNSIGNED_BYTE, DATA);
-
-    CTexPassElement::SRenderData data;
-    data.tex = m_pTexture;
-    data.box = {0, 0, MONSIZE.x, MONSIZE.y};
-    data.a   = 1.F;
-
-    g_pHyprRenderer->m_sRenderPass.add(makeShared<CTexPassElement>(data));
+    g_pHyprRenderer->m_sRenderPass.add(makeShared<CNotifPassElement>(data));
 }
 
 bool CHyprNotificationOverlay::hasAny() {

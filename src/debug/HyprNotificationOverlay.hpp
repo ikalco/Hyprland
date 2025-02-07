@@ -4,6 +4,7 @@
 #include "../helpers/Timer.hpp"
 #include "../render/Texture.hpp"
 #include "../SharedDefs.hpp"
+#include "../render/pass/NotifPassElement.hpp"
 
 #include <vector>
 
@@ -27,12 +28,14 @@ static const std::array<CHyprColor, ICON_NONE + 1> ICONS_COLORS = {CHyprColor{25
                                                                    CHyprColor{0, 0, 0, 1.0}};
 
 struct SNotification {
-    std::string text = "";
-    CHyprColor  color;
-    CTimer      started;
-    float       timeMs   = 0;
-    eIcons      icon     = ICON_NONE;
-    float       fontSize = 13.f;
+    SP<CTexture> textTexture;
+    std::string  text = "";
+    CHyprColor   color;
+    CTimer       started;
+    Vector2D     size     = {-1, -1};
+    float        timeMs   = 0;
+    eIcons       icon     = ICON_NONE;
+    float        fontSize = 13.f;
 };
 
 class CHyprNotificationOverlay {
@@ -46,7 +49,8 @@ class CHyprNotificationOverlay {
     bool hasAny();
 
   private:
-    CBox                           drawNotifications(PHLMONITOR pMonitor);
+    CBox                           calcNotifications(PHLMONITOR pMonitor, std::vector<CNotifPassElement::SNotifRenderData>& notifs);
+    void                           drawTextTexture(PHLMONITOR pMonitor);
     CBox                           m_bLastDamage;
 
     std::vector<UP<SNotification>> m_vNotifications;
@@ -56,8 +60,6 @@ class CHyprNotificationOverlay {
 
     PHLMONITORREF                  m_pLastMonitor;
     Vector2D                       m_vecLastSize = Vector2D(-1, -1);
-
-    SP<CTexture>                   m_pTexture;
 };
 
 inline UP<CHyprNotificationOverlay> g_pHyprNotificationOverlay;

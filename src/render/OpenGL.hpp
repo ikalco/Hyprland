@@ -183,6 +183,7 @@ class CHyprOpenGLImpl {
     void renderBorder(const CBox&, const CGradientValueData&, const CGradientValueData&, float lerp, int round, float roundingPower, int borderSize, float a = 1.0,
                       int outerRound = -1 /* use round */);
     void renderTextureMatte(SP<CTexture> tex, const CBox& pBox, CFramebuffer& matte);
+    void renderNotifRects(const CBox rects[4], const CHyprColor& color, const CHyprColor& iconColor);
 
     void setMonitorTransformEnabled(bool enabled);
     void setRenderModifEnabled(bool enabled);
@@ -325,6 +326,7 @@ class CHyprOpenGLImpl {
     friend class CTexPassElement;
     friend class CPreBlurElement;
     friend class CSurfacePassElement;
+    friend class CNotifPassElement;
 };
 
 inline UP<CHyprOpenGLImpl> g_pHyprOpenGL;
