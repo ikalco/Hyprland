@@ -1539,7 +1539,7 @@ inline static const std::vector<SConfigOptionDescription> CONFIG_OPTIONS = {
         .value       = "cursor:no_hardware_cursors",
         .description = "disables hardware cursors. Auto = disable when multi-gpu on nvidia",
         .type        = CONFIG_OPTION_CHOICE,
-        .data        = SConfigOptionDescription::SChoiceData{0, "Disabled,Enabled,Auto"},
+        .data        = SConfigOptionDescription::SChoiceData{0, "Disabled,Enabled"},
     },
     SConfigOptionDescription{
         .value       = "cursor:no_break_fs_vrr",

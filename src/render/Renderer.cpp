@@ -41,6 +41,7 @@
 #include <hyprutils/utils/ScopeGuard.hpp>
 using namespace Hyprutils::Utils;
 using namespace Hyprutils::OS;
+using enum Aquamarine::eOutputPresentationMode;
 using enum NContentType::eContentType;
 using namespace NColorManagement;
 
@@ -1229,12 +1230,17 @@ void CHyprRenderer::renderMonitor(PHLMONITOR pMonitor, bool commit) {
 
     // tearing and DS first
     bool shouldTear = pMonitor->updateTearing();
+    if (!shouldTear && !pMonitor->m_currentTearing.expired()) {
+        Debug::log(LOG, "Tearing stopped for window {} on monitor {}", pMonitor->m_currentTearing->m_title, pMonitor->m_name);
+        pMonitor->m_currentTearing.reset();
+        g_pPointerManager->unlockSoftwareForMonitor(pMonitor);
+    }
 
-    if (pMonitor->attemptDirectScanout()) {
+    if (pMonitor->attemptDirectScanout())
         return;
-    } else if (!pMonitor->m_lastScanout.expired()) {
-        Debug::log(LOG, "Left a direct scanout.");
-        pMonitor->m_lastScanout.reset();
+    else if (!pMonitor->m_currentScanout.expired()) {
+        Debug::log(LOG, "Direct scanout stopped for window {} on monitor {}", pMonitor->m_currentScanout->m_title, pMonitor->m_name);
+        pMonitor->m_currentScanout.reset();
 
         // reset DRM format, but only if needed since it might modeset
         if (pMonitor->m_output->state->state().drmFormat != pMonitor->m_prevDrmFormat)
@@ -1401,14 +1407,9 @@ void CHyprRenderer::renderMonitor(PHLMONITOR pMonitor, bool commit) {
     EMIT_HOOK_EVENT("render", RENDER_POST);
 
     pMonitor->m_output->state->addDamage(frameDamage);
-    pMonitor->m_output->state->setPresentationMode(shouldTear ? Aquamarine::eOutputPresentationMode::AQ_OUTPUT_PRESENTATION_IMMEDIATE :
-                                                                Aquamarine::eOutputPresentationMode::AQ_OUTPUT_PRESENTATION_VSYNC);
 
     if (commit)
         commitPendingAndDoExplicitSync(pMonitor);
-
-    if (shouldTear)
-        pMonitor->m_tearingState.busy = true;
 
     if (*PDAMAGEBLINK || *PVFR == 0 || pMonitor->m_pendingFrame)
         g_pCompositor->scheduleFrameForMonitor(pMonitor, Aquamarine::IOutput::AQ_SCHEDULE_RENDER_MONITOR);
@@ -1558,6 +1559,12 @@ bool CHyprRenderer::commitPendingAndDoExplicitSync(PHLMONITOR pMonitor) {
         pMonitor->m_output->state->setCTM(pMonitor->m_ctm);
     }
 
+    // reset DRM format, but only if needed since it might modeset
+    if (pMonitor->m_output->state->state().drmFormat != pMonitor->m_drmFormat)
+        pMonitor->m_output->state->setFormat(pMonitor->m_drmFormat);
+
+    pMonitor->m_output->state->setPresentationMode(!pMonitor->m_currentTearing.expired() ? AQ_OUTPUT_PRESENTATION_IMMEDIATE : AQ_OUTPUT_PRESENTATION_VSYNC);
+
     bool ok = pMonitor->m_state.commit();
     if (!ok) {
         if (pMonitor->m_inFence.isValid()) {
@@ -1573,6 +1580,11 @@ bool CHyprRenderer::commitPendingAndDoExplicitSync(PHLMONITOR pMonitor) {
             pMonitor->m_output->swapchain->rollback();
             pMonitor->m_damage.damageEntire();
         }
+    }
+
+    if (ok) {
+        pMonitor->m_pageFlipPending          = true;
+        pMonitor->m_scanoutNeedsCursorUpdate = false;
     }
 
     return ok;
